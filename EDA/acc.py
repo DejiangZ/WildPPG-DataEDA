@@ -39,7 +39,7 @@ def load_wildppg_participant(path):
 
 # 指定路径
 data_path = r'G:\My Drive\Dataset\WildPPG'
-mat_path = 'WildPPG_Part_fex.mat'
+mat_path = 'WildPPG_Part_an0.mat'
 file_path = os.path.join(data_path, mat_path)
 
 # 加载数据

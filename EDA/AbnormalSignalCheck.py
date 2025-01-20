@@ -2,7 +2,7 @@ import numpy as np
 import scipy.io
 import os
 from typing import Dict, List, Tuple
-
+from pythonProject.EDA.MissingRateCheck import checker
 
 class WildPPGSignalQualityChecker:
     """
@@ -11,6 +11,7 @@ class WildPPGSignalQualityChecker:
     1. Accelerometer signal range check (> 10g)
     2. Weak signal detection for PPG and ECG
     """
+
 
     def __init__(self, data_path: str):
         """
@@ -181,37 +182,36 @@ class WildPPGSignalQualityChecker:
             else:
                 print("No signal data available")
 
-
 def load_wildppg_participant(path: str) -> Dict:
-    """
-    Load and clean WildPPG participant data
+        """
+        Load and clean WildPPG participant data
 
-    Args:
-        path: Path to the .mat file
+        Args:
+            path: Path to the .mat file
 
-    Returns:
-        Cleaned data dictionary
-    """
-    loaded_data = scipy.io.loadmat(path)
-    loaded_data['id'] = loaded_data['id'][0]
-    loaded_data['notes'] = "" if len(loaded_data['notes']) == 0 else loaded_data['notes'][0]
+        Returns:
+            Cleaned data dictionary
+        """
+        loaded_data = scipy.io.loadmat(path)
+        loaded_data['id'] = loaded_data['id'][0]
+        loaded_data['notes'] = "" if len(loaded_data['notes']) == 0 else loaded_data['notes'][0]
 
-    for bodyloc in ['sternum', 'head', 'wrist', 'ankle']:
-        bodyloc_data = dict()
-        if bodyloc in loaded_data:
-            sensors = loaded_data[bodyloc][0].dtype.names
-            for sensor_name, sensor_data in zip(sensors, loaded_data[bodyloc][0][0]):
-                bodyloc_data[sensor_name] = dict()
-                field_names = sensor_data[0][0].dtype.names
-                for sensor_field, field_data in zip(field_names, sensor_data[0][0]):
-                    bodyloc_data[sensor_name][sensor_field] = field_data[0]
-                    if sensor_field == 'fs':
-                        bodyloc_data[sensor_name][sensor_field] = bodyloc_data[sensor_name][sensor_field][0]
-            loaded_data[bodyloc] = bodyloc_data
-        else:
-            loaded_data[bodyloc] = None
+        for bodyloc in ['sternum', 'head', 'wrist', 'ankle']:
+            bodyloc_data = dict()
+            if bodyloc in loaded_data:
+                sensors = loaded_data[bodyloc][0].dtype.names
+                for sensor_name, sensor_data in zip(sensors, loaded_data[bodyloc][0][0]):
+                    bodyloc_data[sensor_name] = dict()
+                    field_names = sensor_data[0][0].dtype.names
+                    for sensor_field, field_data in zip(field_names, sensor_data[0][0]):
+                        bodyloc_data[sensor_name][sensor_field] = field_data[0]
+                        if sensor_field == 'fs':
+                            bodyloc_data[sensor_name][sensor_field] = bodyloc_data[sensor_name][sensor_field][0]
+                loaded_data[bodyloc] = bodyloc_data
+            else:
+                loaded_data[bodyloc] = None
 
-    return loaded_data
+        return loaded_data
 
 
 # Example usage
