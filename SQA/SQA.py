@@ -1,195 +1,217 @@
 import numpy as np
-from scipy import signal
-import os
-from typing import Dict, List, Tuple
-import scipy.io
+from typing import Dict, List, Union
+import pandas as pd
 
 
-class PPGQualityChecker:
+class PPGQualityAssessor:
     """
-    PPG signal quality assessment system for WildPPG dataset
+    PPG signal quality assessment based on first-order predictor coefficient (FOPC)
+    method from the paper "On-Device Integrated PPG Quality Assessment".
+
     Features:
-    1. Acceleration-based motion artifact detection
-    2. Signal saturation detection
-    3. Predictor coefficient based quality assessment
+    1. Differenced sensor signal computation
+    2. Random noise addition
+    3. FOPC calculation
+    4. Hierarchical decision rules for quality assessment
     """
 
-    def __init__(self, data_path: str):
+    def __init__(self):
+        """Initialize the PPG quality assessor with default parameters"""
+        # Thresholds for quality assessment
+        self.noise_amplitude = 0.1  # Random noise amplitude (10% of signal)
+        self.fopc_thresholds = {
+            'noise_free': 0.93,  # Threshold for noise-free PPG
+            'corrupted': -0.5  # Threshold for corrupted signal
+        }
+        self.amp_threshold = 1e-6   # Amplitude threshold for NZA detection
+        self.saturation_count = 2  # Minimum consecutive samples for saturation
+
+    def _compute_differenced_signal(self, signal: np.ndarray) -> np.ndarray:
         """
-        Initialize the checker
+        Compute differenced sensor signal
 
         Args:
-            data_path: Path to WildPPG dataset
-        """
-        self.data_path = data_path
-        self.body_locations = ['sternum', 'head', 'ankle', 'wrist']
-
-        # Thresholds
-        self.acc_threshold = 7.0  # Acceleration threshold in g
-        self.pc_threshold = 0.93  # Predictor coefficient threshold
-        self.fs = 128  # Sampling frequency
-
-    def load_data(self, file_name: str) -> Dict:
-        """
-        Load and clean WildPPG participant data
-
-        Args:
-            file_name: Name of the .mat file
+            signal: Input PPG signal
 
         Returns:
-            Cleaned data dictionary
+            Differenced signal
         """
-        file_path = os.path.join(self.data_path, file_name)
-        loaded_data = scipy.io.loadmat(file_path)
+        return np.diff(signal, prepend=signal[0])
 
-        # Clean ID and notes
-        loaded_data['id'] = loaded_data['id'][0]
-        loaded_data['notes'] = "" if len(loaded_data['notes']) == 0 else loaded_data['notes'][0]
-
-        # Clean body location data
-        for bodyloc in self.body_locations:
-            bodyloc_data = dict()
-            sensors = loaded_data[bodyloc][0].dtype.names
-            for sensor_name, sensor_data in zip(sensors, loaded_data[bodyloc][0][0]):
-                bodyloc_data[sensor_name] = dict()
-                field_names = sensor_data[0][0].dtype.names
-                for sensor_field, field_data in zip(field_names, sensor_data[0][0]):
-                    bodyloc_data[sensor_name][sensor_field] = field_data[0]
-                    if sensor_field == 'fs':
-                        bodyloc_data[sensor_name][sensor_field] = bodyloc_data[sensor_name][sensor_field][0]
-            loaded_data[bodyloc] = bodyloc_data
-
-        return loaded_data
-
-    def check_saturation(self, signal: np.ndarray) -> bool:
+    def _add_random_noise(self, signal: np.ndarray) -> np.ndarray:
         """
-        Check if signal is saturated
-
-        Args:
-            signal: PPG signal to check
-
-        Returns:
-            True if signal is saturated, False otherwise
-        """
-        # Check for constant values that indicate saturation
-        diff = np.diff(signal)
-        zero_runs = np.where(diff == 0)[0]
-
-        if len(zero_runs) > 0:
-            # Check for runs of constant values
-            run_lengths = np.diff(np.where(np.abs(np.diff(zero_runs)) > 1)[0])
-            if np.any(run_lengths > self.fs * 0.1):  # Runs longer than 100ms
-                return True
-        return False
-
-    def get_acc_magnitude(self, data: Dict, location: str) -> np.ndarray:
-        """
-        Calculate acceleration magnitude for given location
-
-        Args:
-            data: Data dictionary
-            location: Body location
-
-        Returns:
-            Acceleration magnitude array
-        """
-        acc_x = data[location]['acc_x']['v']
-        acc_y = data[location]['acc_y']['v']
-        acc_z = data[location]['acc_z']['v']
-
-        return np.sqrt(acc_x ** 2 + acc_y ** 2 + acc_z ** 2)
-
-    def compute_predictor_coefficient(self, signal: np.ndarray) -> float:
-        """
-        Compute first order predictor coefficient
+        Add random noise to normalized signal
 
         Args:
             signal: Input signal
 
         Returns:
-            Predictor coefficient value
+            Signal with added noise
         """
-        # Add random noise to improve feature discrimination
-        noise_level = 0.1
-        noise = np.random.normal(0, noise_level, len(signal))
-        signal = signal + noise
-
-        # Compute first difference
-        diff_signal = np.diff(signal)
-
-        # Normalize
-        diff_signal = diff_signal / np.max(np.abs(diff_signal))
-
-        # Compute autocorrelation coefficients
-        r = np.correlate(diff_signal, diff_signal, mode='full')
-        r = r[len(r) // 2:][:2]
-
-        # Compute predictor coefficient
-        if r[0] != 0:
-            pc = r[1] / r[0]
+        # Normalize signal
+        if np.max(np.abs(signal)) > 0:
+            normalized = signal / np.max(np.abs(signal))
         else:
-            pc = 0
+            normalized = signal
 
-        return pc
+        # Add random noise
+        noise = np.random.normal(0, self.noise_amplitude, size=len(signal))
+        return normalized + noise
 
-    def assess_quality(self, data: Dict, location: str) -> Dict:
+    def _compute_fopc(self, signal: np.ndarray) -> float:
         """
-        Assess PPG signal quality for given location
+        Compute first-order predictor coefficient
 
         Args:
-            data: Data dictionary
-            location: Body location to assess
+            signal: Input signal
 
         Returns:
-            Quality assessment results
+            First-order predictor coefficient
         """
+        if len(signal) < 2:
+            return 0
+
+        # Compute autocorrelation at lags 0 and 1
+        r0 = np.sum(signal * signal)
+        r1 = np.sum(signal[:-1] * signal[1:])
+
+        if r0 == 0:
+            return 0
+
+        return r1 / r0
+
+    def _check_saturation(self, signal: np.ndarray,
+                          quantization_bits: int = 10) -> bool:
+        """
+        Check for signal saturation
+        """
+        # 增加信号范围检查的容忍度
+        max_value = 2 ** quantization_bits - 1
+
+        # 调整饱和阈值
+        high_threshold = max_value * 0.95  # 95%最大值
+        low_threshold = max_value * 0.05  # 5%最大值
+
+        saturated_high = np.where(signal >= high_threshold)[0]
+        saturated_low = np.where(signal <= low_threshold)[0]
+
+        # 要求更多的连续样本
+        self.saturation_count = 10  # 增加连续样本数要求
+
+        for sat_indices in [saturated_high, saturated_low]:
+            if len(sat_indices) >= self.saturation_count:
+                for i in range(len(sat_indices) - self.saturation_count + 1):
+                    if np.all(np.diff(sat_indices[i:i + self.saturation_count]) == 1):
+                        return True
+        return False
+
+    def _check_nza(self, signal: np.ndarray) -> bool:
+        """
+        Check for nearly-zero amplitude signal
+
+        Args:
+            signal: Input signal
+
+        Returns:
+            True if signal has nearly-zero amplitude
+        """
+        return np.max(np.abs(signal)) < self.amp_threshold
+
+    def assess_quality(self, signal: np.ndarray) -> Dict:
+        """
+        Assess PPG signal quality using hierarchical decision rules
+
+        Args:
+            signal: Input PPG signal
+
+        Returns:
+            Dictionary containing quality assessment results
+        """
+
         results = {
-            'location': location,
-            'quality': 'unknown',
-            'issues': []
+            'is_nza': False,
+            'is_saturated': False,
+            'quality_class': None,
+            'fopc_value': None
         }
 
-        # Get PPG and acceleration data
-        ppg_signal = data[location]['ppg_g']['v']
-        acc_mag = self.get_acc_magnitude(data, location)
-
-        # Check for saturation
-        if self.check_saturation(ppg_signal):
-            results['quality'] = 'poor'
-            results['issues'].append('signal_saturation')
+        # Rule 1: Check for nearly-zero amplitude
+        if self._check_nza(signal):
+            results['is_nza'] = True
+            results['quality_class'] = 'nza'
             return results
 
-        # Check acceleration
-        if np.any(acc_mag > self.acc_threshold):
-            results['quality'] = 'poor'
-            results['issues'].append('motion_artifact')
+        # Rule 2: Check for saturation
+        if self._check_saturation(signal):
+            results['is_saturated'] = True
+            results['quality_class'] = 'saturated'
+            return results
 
-        # Compute predictor coefficient
-        pc = self.compute_predictor_coefficient(ppg_signal)
+        # Compute FOPC for quality assessment
+        diff_signal = self._compute_differenced_signal(signal)
+        noisy_signal = self._add_random_noise(diff_signal)
+        fopc = self._compute_fopc(noisy_signal)
+        results['fopc_value'] = fopc
 
-        # Classify signal quality based on PC
-        if pc > self.pc_threshold:
-            if 'motion_artifact' not in results['issues']:
-                results['quality'] = 'good'
-        elif pc > -0.5:
-            results['quality'] = 'poor'
-            if 'motion_artifact' not in results['issues']:
-                results['issues'].append('noisy_signal')
+        # Rules 3-5: Classify based on FOPC value
+        if fopc > self.fopc_thresholds['noise_free']:
+            results['quality_class'] = 'noise_free'
+        elif fopc > self.fopc_thresholds['corrupted']:
+            results['quality_class'] = 'motion_corrupted'
         else:
-            results['quality'] = 'poor'
-            results['issues'].append('no_pulse')
+            results['quality_class'] = 'pulse_free_noise'
 
         return results
 
-# 创建质量检查器实例
-checker = PPGQualityChecker("G:\\My Drive\\Dataset\\WildPPG")
+    def process_dataframe(self, df: pd.DataFrame, location: str = 'wrist',
+                          signal_type: str = 'ppg_g') -> pd.DataFrame:
+        """
+        Process DataFrame containing PPG signals
 
-# 加载一个参与者的数据
-data = checker.load_data("WildPPG_Part_an0.mat")
+        Args:
+            df: Input DataFrame with PPG signals
+            location: Body location for PPG signal
+            signal_type: Type of PPG signal to assess
 
-for location in checker.body_locations:
-    results = checker.assess_quality(data, location)
-    print(f"\nLocation: {results['location']}")
-    print(f"Quality: {results['quality']}")
-    if results['issues']:
-        print(f"Issues: {', '.join(results['issues'])}")
+        Returns:
+            DataFrame with quality assessment results added
+        """
+        # Create copy of input DataFrame
+        df_assessed = df.copy()
+
+        # Column name for the PPG signal
+        signal_col = f'{location}_{signal_type}'
+
+        # Assess quality for each window
+        quality_results = []
+        for _, row in df.iterrows():
+            if signal_col in row:
+                signal = row[signal_col]
+                results = self.assess_quality(signal)
+                quality_results.append(results)
+            else:
+                quality_results.append({
+                    'is_nza': None,
+                    'is_saturated': None,
+                    'quality_class': 'missing_signal',
+                    'fopc_value': None
+                })
+
+        # Add results to DataFrame
+        df_assessed[f'{signal_col}_is_nza'] = [r['is_nza'] for r in quality_results]
+        df_assessed[f'{signal_col}_is_saturated'] = [r['is_saturated'] for r in quality_results]
+        df_assessed[f'{signal_col}_quality'] = [r['quality_class'] for r in quality_results]
+        df_assessed[f'{signal_col}_fopc'] = [r['fopc_value'] for r in quality_results]
+
+        return df_assessed
+
+
+# Example usage with SQAbasingACC:
+if __name__ == "__main__":
+    # Create quality assessor
+    quality_assessor = PPGQualityAssessor()
+
+    # Example with random signal
+    signal = np.random.randn(1000)
+    results = quality_assessor.assess_quality(signal)
+    print("Quality assessment results:", results)
