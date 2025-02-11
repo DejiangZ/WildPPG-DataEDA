@@ -4,14 +4,9 @@ from typing import Dict, List, Tuple
 import scipy.io
 import os
 
-
 class WildPPGProcessor:
     """
-    Process WildPPG dataset with sliding window analysis:
-    1. Segment signals into 8-second windows with 2-second stride
-    2. Create DataFrame structure combining signals from all locations
-    3. Calculate and classify acceleration levels
-    4. Provide interface for quality assessment
+    Process WildPPG dataset with sliding window analysis and acceleration-based classification
     """
 
     def __init__(self, data_path: str):
@@ -28,10 +23,8 @@ class WildPPGProcessor:
         self.samples_per_window = self.window_size * self.sampling_rate
         self.stride_samples = self.stride * self.sampling_rate
 
-        # Body locations to analyze
+        # Body locations and signals to analyze
         self.body_locations = ['sternum', 'head', 'ankle', 'wrist']
-
-        # Signal types to include
         self.ppg_signals = ['ppg_g', 'ppg_ir', 'ppg_r']
         self.acc_signals = ['acc_x', 'acc_y', 'acc_z']
         self.other_signals = ['altitude', 'temperature']
@@ -39,9 +32,8 @@ class WildPPGProcessor:
         # Acceleration thresholds (in g)
         self.acc_thresholds = {
             'stationary': 1.0,
-            'light_motion': 1.5,
-            'moderate_motion': 2.0,
-            'intensive_motion': 4.0
+            'moderate_motion': 1.1,
+            'intensive_motion': float('inf')
         }
 
     def load_data(self, file_name: str) -> Dict:
@@ -68,45 +60,19 @@ class WildPPGProcessor:
 
         return loaded_data
 
-    def segment_signal(self, signal: np.ndarray) -> List[np.ndarray]:
-        """
-        Segment signal into overlapping windows with specified stride
-
-        Args:
-            signal: Input signal array
-
-        Returns:
-            List of windowed signal segments
-        """
-        total_samples = len(signal)
-        windows = []
-
-        # Calculate number of windows
-        n_windows = (total_samples - self.samples_per_window) // self.stride_samples + 1
-
-        for i in range(n_windows):
-            start_idx = i * self.stride_samples
-            end_idx = start_idx + self.samples_per_window
-            if end_idx <= total_samples:
-                windows.append(signal[start_idx:end_idx])
-
-        return windows
-
     def classify_motion(self, mean_acc: float) -> str:
         """
-        Classify motion level based on mean acceleration.
+        Classify motion level based on mean acceleration
 
         Args:
-            mean_acc: Mean acceleration magnitude (g).
+            mean_acc: Mean acceleration magnitude (g)
 
         Returns:
-            Motion classification label.
+            Motion classification label
         """
-        if mean_acc <= 1.0:
+        if mean_acc <= self.acc_thresholds['stationary']:
             return 'stationary'
-        elif mean_acc <= 1.1:
-            return 'light_motion'
-        elif mean_acc <= 1.5:
+        elif mean_acc <= self.acc_thresholds['moderate_motion']:
             return 'moderate_motion'
         else:
             return 'intensive_motion'
@@ -141,8 +107,7 @@ class WildPPGProcessor:
                 'start_sample': window_idx * self.stride_samples,
                 'end_sample': window_idx * self.stride_samples + self.samples_per_window,
                 'start_time': window_idx * self.stride,
-                'end_time': window_idx * self.stride + self.window_size,
-                'quality_score': None  # Reserved for quality assessment
+                'end_time': window_idx * self.stride + self.window_size
             }
 
             # Add data from each location
@@ -150,22 +115,14 @@ class WildPPGProcessor:
                 start_idx = window_idx * self.stride_samples
                 end_idx = start_idx + self.samples_per_window
 
-                # Add and normalize PPG signals
+                # Add PPG signals
                 for sig in self.ppg_signals:
-                    # Check if signal exists and has data
                     if sig in data[location] and len(data[location][sig]['v']) > 0:
-                        signal = data[location][sig]['v'][start_idx:end_idx]
-                        if len(signal) > 0:  # Check if signal slice is not empty
-                            if np.max(signal) != np.min(signal):  # Avoid division by zero
-                                signal = ((signal - np.min(signal)) /
-                                          (np.max(signal) - np.min(signal))) * 1023
-                            window_data[f'{location}_{sig}'] = signal
-                        else:
-                            window_data[f'{location}_{sig}'] = np.zeros(self.samples_per_window)
+                        window_data[f'{location}_{sig}'] = data[location][sig]['v'][start_idx:end_idx]
                     else:
                         window_data[f'{location}_{sig}'] = np.zeros(self.samples_per_window)
 
-                # Add accelerometer signals (no normalization needed)
+                # Add accelerometer signals
                 for sig in self.acc_signals:
                     if sig in data[location] and len(data[location][sig]['v']) > 0:
                         window_data[f'{location}_{sig}'] = data[location][sig]['v'][start_idx:end_idx]
@@ -173,12 +130,9 @@ class WildPPGProcessor:
                         window_data[f'{location}_{sig}'] = np.zeros(self.samples_per_window)
 
                 # Calculate acceleration magnitude
-                acc_x = data[location]['acc_x']['v'][start_idx:end_idx] if 'acc_x' in data[location] else np.zeros(
-                    self.samples_per_window)
-                acc_y = data[location]['acc_y']['v'][start_idx:end_idx] if 'acc_y' in data[location] else np.zeros(
-                    self.samples_per_window)
-                acc_z = data[location]['acc_z']['v'][start_idx:end_idx] if 'acc_z' in data[location] else np.zeros(
-                    self.samples_per_window)
+                acc_x = window_data[f'{location}_acc_x']
+                acc_y = window_data[f'{location}_acc_y']
+                acc_z = window_data[f'{location}_acc_z']
 
                 acc_mag = np.sqrt(acc_x ** 2 + acc_y ** 2 + acc_z ** 2)
                 window_data[f'{location}_acc_magnitude'] = acc_mag
@@ -188,66 +142,49 @@ class WildPPGProcessor:
                 # Add ECG if available (only for sternum)
                 if location == 'sternum' and 'ecg' in data[location]:
                     if len(data[location]['ecg']['v']) > 0:
-                        ecg_signal = data[location]['ecg']['v'][start_idx:end_idx]
-                        if len(ecg_signal) > 0:
-                            if np.max(ecg_signal) != np.min(ecg_signal):
-                                ecg_signal = ((ecg_signal - np.min(ecg_signal)) /
-                                              (np.max(ecg_signal) - np.min(ecg_signal))) * 1023
-                            window_data['ecg'] = ecg_signal
-                        else:
-                            window_data['ecg'] = np.zeros(self.samples_per_window)
+                        window_data['ecg'] = data[location]['ecg']['v'][start_idx:end_idx]
+                    else:
+                        window_data['ecg'] = np.zeros(self.samples_per_window)
 
-                # Add other signals with normalization
+                # Add other signals
                 for sig in self.other_signals:
                     if sig in data[location] and len(data[location][sig]['v']) > 0:
-                        signal = data[location][sig]['v'][start_idx:end_idx]
-                        if len(signal) > 0:
-                            if np.max(signal) != np.min(signal):
-                                signal = ((signal - np.min(signal)) /
-                                          (np.max(signal) - np.min(signal))) * 1023
-                            window_data[f'{location}_{sig}'] = signal
-                        else:
-                            window_data[f'{location}_{sig}'] = np.zeros(self.samples_per_window)
+                        window_data[f'{location}_{sig}'] = data[location][sig]['v'][start_idx:end_idx]
                     else:
                         window_data[f'{location}_{sig}'] = np.zeros(self.samples_per_window)
 
             windows_data.append(window_data)
 
-        df = pd.DataFrame(windows_data)
+        return pd.DataFrame(windows_data)
 
-        return df
-
-
-
-from SQA import PPGQualityAssessor
-
+# Example usage
 if __name__ == "__main__":
-    # Create processor instance
+    from SQA import PPGQualityAssessor
+
+    # Create processor and quality assessor instances
     processor = WildPPGProcessor("G:\\My Drive\\Dataset\\WildPPG")
     quality_assessor = PPGQualityAssessor()
+
     # Process single file
     file_name = "WildPPG_Part_an0.mat"
     df = processor.create_window_dataframe(file_name)
 
+    # Analyze quality for each location and PPG channel
     for location in processor.body_locations:
         print(f"\n=== Quality Assessment Results for {location.upper()} ===")
 
-        # Assess quality for each PPG channel
         for ppg_type in processor.ppg_signals:
             signal_col = f'{location}_{ppg_type}'
             df_assessed = quality_assessor.process_dataframe(df, location=location, signal_type=ppg_type)
 
-            # Get motion class statistics
+            # Quality distribution by motion class
             print(f"\nSignal: {ppg_type}")
             print("\nQuality distribution by motion class:")
-
-            # Group by motion class and quality
             stats = pd.crosstab(
                 df_assessed[f'{location}_motion_class'],
                 df_assessed[f'{signal_col}_quality'],
                 normalize='index'
             ) * 100
-
             print(stats.round(2))
 
             # Overall quality statistics
